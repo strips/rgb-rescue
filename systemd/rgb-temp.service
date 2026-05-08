@@ -1,0 +1,7 @@
+[Unit]
+Description=Set RGB color from CPU temperature (one shot)
+After=rgb-static.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rgb-temp-watch

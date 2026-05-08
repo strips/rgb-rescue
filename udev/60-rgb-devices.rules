@@ -1,0 +1,36 @@
+# /etc/udev/rules.d/60-rgb-devices.rules
+# RGB HID device access rules — GK50 keyboard, Mystic Light MB, ENE DRAM.
+#
+# Interface 1 (usage page 0xFF00) is the RGB control interface.
+# ATTRS{bInterfaceNumber}=="01" pins the rule to that specific hidraw node.
+
+# Grant access to the plugdev group so non-root users in that group can
+# run gk50-set-color without sudo.
+SUBSYSTEM=="hidraw", \
+    ATTRS{idVendor}=="0db0", \
+    ATTRS{idProduct}=="0b5a", \
+    ATTRS{bInterfaceNumber}=="01", \
+    TAG+="uaccess", \
+    GROUP="plugdev", \
+    MODE="0660"
+
+# Re-apply the saved color whenever the keyboard is reconnected.
+# Reuses the boot service — no extra unit file needed.
+SUBSYSTEM=="hidraw", \
+    ATTRS{idVendor}=="0db0", \
+    ATTRS{idProduct}=="0b5a", \
+    ATTRS{bInterfaceNumber}=="01", \
+    ACTION=="add", \
+    RUN+="/bin/systemctl start rgb-static.service"
+
+# MSI MAG Z390 TOMAHAWK — Mystic Light USB HID (interface 0 = control interface).
+SUBSYSTEM=="hidraw", \
+    ATTRS{idVendor}=="1462", \
+    ATTRS{idProduct}=="7b18", \
+    ATTRS{bInterfaceNumber}=="00", \
+    TAG+="uaccess", \
+    GROUP="plugdev", \
+    MODE="0660"
+
+# i2c-dev nodes — needed for ENE DRAM RGB and any future i2c RGB drivers.
+SUBSYSTEM=="i2c-dev", TAG+="uaccess", GROUP="i2c", MODE="0660"

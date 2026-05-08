@@ -1,0 +1,28 @@
+[Unit]
+Description=Set RGB color on keyboard, motherboard and RAM
+# Wait for udev to finish settling so the hidraw and i2c nodes are available.
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+# ---------------------------------------------------------------
+# Edit the color (RRGGBB) and brightness (1–5) below.
+# rgb-set-all sets the GK50 keyboard, Mystic Light MB, and ENE DRAM sticks.
+# Brightness: 1=20%  2=40%  3=60%  4=80%  5=100%
+# Examples:
+#   ExecStart=/usr/local/bin/rgb-set-all 00BFFF 4   # deep sky blue, 80%
+#   ExecStart=/usr/local/bin/rgb-set-all 00FF88 3   # mint green, 60%
+#   ExecStart=/usr/local/bin/rgb-set-all FFFFFF 2   # white, 40%
+# ---------------------------------------------------------------
+ExecStart=/usr/local/bin/rgb-set-all 00BFFF 4
+
+# If the keyboard needs a moment after USB enumeration, uncomment:
+# ExecStartPre=/bin/sleep 1
+
+# Keep the unit in "active" state after the oneshot exits so that
+# `systemctl status rgb-static` shows the color that was set.
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

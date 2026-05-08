@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# probe-rgb-hardware — dump USB and i2c device info needed to write RGB drivers.
+#
+# Run this and paste the output so the correct direct-HID / SMBus drivers can
+# be written for your specific hardware.
+#
+# Requires: i2c-tools (apt install i2c-tools), usbutils (apt install usbutils)
+# The i2c-dev kernel module must be loaded:  sudo modprobe i2c-dev
+
+set -euo pipefail
+
+SEP="───────────────────────────────────────────────────────────"
+
+echo "$SEP"
+echo "RGB HARDWARE PROBE — $(date)"
+echo "$SEP"
+
+# ── ALL USB devices (unfiltered — RGB controllers may have no obvious name) ──
+echo
+echo "=== All USB devices ==="
+if command -v lsusb &>/dev/null; then
+    lsusb
+    echo
+    echo "=== USB HID devices (detailed) ==="
+    # Show only HID-class devices in detail — avoids huge output from storage/hubs
+    lsusb -v 2>/dev/null | awk '
+        /^Bus [0-9]/ { bus=$0; vid=""; pid=""; mfr=""; prod=""; cls="" }
+        /idVendor/   { vid=$0 }
+        /idProduct/  { pid=$0 }
+        /iManufacturer/ { mfr=$0 }
+        /iProduct/   { prod=$0 }
+        /bDeviceClass|bInterfaceClass/ { cls=cls" "$0 }
+        /^$/ {
+            if (vid != "" && (cls ~ /Human Interface/ || cls ~ /HID/ || cls ~ /03 /)) {
+                print "---"
+                print bus; print vid; print pid; print mfr; print prod; print cls
+            }
+            bus=""; vid=""; pid=""; mfr=""; prod=""; cls=""
+        }
+    '
+else
+    echo "lsusb not found — install with: sudo apt install usbutils"
+fi
+
+# ── i2c bus enumeration ──────────────────────────────────────────────────────
+echo
+echo "=== i2c buses ==="
+if command -v i2cdetect &>/dev/null; then
+    for bus in /dev/i2c-*; do
+        busnum="${bus##*-}"
+        echo
+        echo "--- Bus $busnum ($bus) ---"
+        # -y = non-interactive, -r = read probe (safer than write probe)
+        i2cdetect -y -r "$busnum" 2>/dev/null || echo "(permission denied — run as root)"
+    done
+else
+    echo "i2cdetect not found — install with: sudo apt install i2c-tools"
+fi
+
+# ── Targeted dumps at suspected RGB addresses ────────────────────────────────
+# DDR4 RGB controllers: 0x58–0x5F  (one per DIMM)
+# DDR5 SPD5118:         0x50–0x57  (already kernel-claimed as UU)
+# MSI Mystic Light i2c: 0x28, 0x44–0x45 (NCT6687D / EC)
+# Generic MB LED zones: 0x27, 0x48, 0x52, 0x68
+echo
+echo "=== i2c targeted dumps (byte mode then word mode) ==="
+if command -v i2cdump &>/dev/null; then
+    TARGET_ADDRS=(0x28 0x44 0x45 0x58 0x59 0x5A 0x5B 0x5C 0x5D 0x5E 0x5F 0x60 0x61 0x62 0x63 0x68)
+    for bus in /dev/i2c-*; do
+        busnum="${bus##*-}"
+        for addr in "${TARGET_ADDRS[@]}"; do
+            dec=$((addr))
+            # Only dump if something ACKs at this address
+            if i2cdetect -y -r "$busnum" "$dec" "$dec" 2>/dev/null \
+                    | grep -qE '[0-9a-f]{2}'; then
+                echo
+                echo "--- Bus $busnum addr $addr (byte mode) ---"
+                i2cdump -y "$busnum" "$addr" b 2>/dev/null | head -10 || true
+                echo "--- Bus $busnum addr $addr (word mode) ---"
+                i2cdump -y "$busnum" "$addr" w 2>/dev/null | head -5 || true
+            fi
+        done
+    done
+else
+    echo "i2cdump not found — install with: sudo apt install i2c-tools"
+fi
+
+# ── SPD data to identify RAM brand ───────────────────────────────────────────
+# SPD byte 0x40 = manufacturer ID (2-byte JEDEC bank+mfr code)
+echo
+echo "=== RAM manufacturer (from SPD) ==="
+if command -v i2cdump &>/dev/null; then
+    for bus in /dev/i2c-*; do
+        busnum="${bus##*-}"
+        for addr in 0x50 0x51 0x52 0x53 0x54 0x55 0x56 0x57; do
+            dec=$((addr))
+            if i2cdetect -y -r "$busnum" "$dec" "$dec" 2>/dev/null \
+                    | grep -qE '[0-9a-f]{2}'; then
+                echo
+                echo "--- Bus $busnum DIMM at $addr (first 16 SPD bytes) ---"
+                i2cdump -y "$busnum" "$addr" b 2>/dev/null | head -2 || true
+            fi
+        done
+    done
+fi
+
+# ── DMI / sysfs board info ───────────────────────────────────────────────────
+echo
+echo "=== Motherboard / system identity ==="
+for f in \
+    /sys/class/dmi/id/board_vendor \
+    /sys/class/dmi/id/board_name \
+    /sys/class/dmi/id/board_version \
+    /sys/class/dmi/id/sys_vendor \
+    /sys/class/dmi/id/product_name; do
+    if [[ -r "$f" ]]; then
+        printf "%-30s %s\n" "$(basename "$f"):" "$(cat "$f")"
+    fi
+done
+
+echo
+echo "$SEP"
+echo "Paste this output to get direct-HID/SMBus RGB drivers written."
+echo "$SEP"

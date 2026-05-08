@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""rgb-temp-watch — set keyboard color based on CPU temperature.
+
+Reads the highest CPU temperature from sysfs, maps it to a color band,
+and only writes to hardware when the band changes (to minimise flash wear).
+
+Temperature → color bands (edit BANDS below to taste):
+    < 45°C  →  blue    (#0044FF)  — idle / cool
+    < 60°C  →  cyan    (#00DDCC)  — light load
+    < 72°C  →  green   (#00FF44)  — moderate load
+    < 82°C  →  orange  (#FF6600)  — heavy load
+    ≥ 82°C  →  red     (#FF0000)  — thermal throttle territory
+
+Usage (called by the systemd timer, or manually for testing):
+    rgb-temp-watch          — apply color once and exit
+    rgb-temp-watch --loop   — run continuously (useful for testing)
+
+No external dependencies beyond the Python standard library.
+"""
+
+import glob
+import os
+import subprocess
+import sys
+import time
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+# Each entry: (max_temp_celsius, (R, G, B))
+# Bands are evaluated in order; the first whose threshold is > current temp wins.
+BANDS = [
+    (45, (0x00, 0x44, 0xFF)),   # blue   — cool
+    (60, (0x00, 0xDD, 0xCC)),   # cyan   — light load
+    (72, (0x00, 0xFF, 0x44)),   # green  — moderate
+    (82, (0xFF, 0x66, 0x00)),   # orange — heavy
+    (999, (0xFF, 0x00, 0x00)),  # red    — hot
+]
+
+BRIGHTNESS = 4           # 1–5 (4 = 80 %)
+GK50_BIN          = "/usr/local/bin/gk50-set-color"
+MYSTIC_LIGHT_BIN  = "/usr/local/bin/mystic-light-set-color"
+ENE_DRAM_BIN      = "/usr/local/bin/ene-dram-set-color"
+LOOP_INTERVAL = 60       # seconds between checks when running as a loop
+
+
+# ---------------------------------------------------------------------------
+# Temperature reading
+# ---------------------------------------------------------------------------
+
+def _read_int(path):
+    try:
+        return int(open(path).read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def cpu_temp_celsius():
+    """Return the highest CPU-related temperature in degrees Celsius, or None."""
+    candidates = []
+
+    # hwmon: look for 'Tctl', 'Package id', 'Core', or 'temp' inputs
+    for hwmon in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        name_path = f"{hwmon}/name"
+        name = ""
+        try:
+            name = open(name_path).read().strip().lower()
+        except OSError:
+            pass
+        # Only consider CPU-adjacent hwmon drivers
+        if not any(k in name for k in ("coretemp", "k10temp", "zenpower", "acpitz", "cpu")):
+            continue
+        for t in sorted(glob.glob(f"{hwmon}/temp*_input")):
+            val = _read_int(t)
+            if val is not None:
+                candidates.append(val)
+
+    # Fallback: thermal_zone (works on any kernel)
+    if not candidates:
+        for tz in sorted(glob.glob("/sys/class/thermal/thermal_zone*/temp")):
+            val = _read_int(tz)
+            if val is not None:
+                candidates.append(val)
+
+    if not candidates:
+        return None
+    return max(candidates) / 1000.0  # millidegrees → °C
+
+
+# ---------------------------------------------------------------------------
+# Color selection
+# ---------------------------------------------------------------------------
+
+def color_for_temp(temp):
+    for threshold, rgb in BANDS:
+        if temp < threshold:
+            return rgb
+    return BANDS[-1][1]
+
+
+# ---------------------------------------------------------------------------
+# Hardware writes
+# ---------------------------------------------------------------------------
+
+def apply_all(r, g, b):
+    hex_color = f"{r:02X}{g:02X}{b:02X}"
+    if os.path.exists(GK50_BIN):
+        subprocess.run([GK50_BIN, hex_color, str(BRIGHTNESS)], check=False)
+    if os.path.exists(MYSTIC_LIGHT_BIN):
+        subprocess.run([MYSTIC_LIGHT_BIN, hex_color], check=False)
+    if os.path.exists(ENE_DRAM_BIN):
+        subprocess.run([ENE_DRAM_BIN, hex_color], check=False)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+STATE_FILE = "/run/rgb-temp-watch.band"
+
+
+def _read_state():
+    try:
+        return open(STATE_FILE).read().strip()
+    except OSError:
+        return None
+
+
+def _write_state(band_key):
+    try:
+        with open(STATE_FILE, "w") as f:
+            f.write(band_key)
+    except OSError:
+        pass
+
+
+def run_once():
+    temp = cpu_temp_celsius()
+    if temp is None:
+        # Can't read temperature — fall back to a safe neutral color
+        apply_all(0x00, 0x44, 0xFF)
+        return
+    r, g, b = color_for_temp(temp)
+    band_key = f"{r},{g},{b}"
+    if _read_state() == band_key:
+        return   # band unchanged — skip write, no flicker
+    apply_all(r, g, b)
+    _write_state(band_key)
+
+
+def run_loop():
+    last_band = None
+    while True:
+        temp = cpu_temp_celsius()
+        if temp is not None:
+            band = color_for_temp(temp)
+            if band != last_band:
+                apply_all(*band)
+                last_band = band
+        time.sleep(LOOP_INTERVAL)
+
+
+if __name__ == "__main__":
+    if "--loop" in sys.argv:
+        run_loop()
+    else:
+        run_once()

@@ -1,0 +1,12 @@
+[Unit]
+Description=Update RGB color from CPU temperature every minute
+
+[Timer]
+# Run once at boot (after a short delay so the keyboard is ready)
+OnBootSec=30
+# Then every 60 seconds
+OnUnitActiveSec=60
+Unit=rgb-temp.service
+
+[Install]
+WantedBy=timers.target

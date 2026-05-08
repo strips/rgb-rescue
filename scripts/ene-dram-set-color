@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Set a static color on ENE-based RGB DRAM sticks via SMBus.
+
+Usage:
+    ene-dram-set-color RRGGBB
+    ene-dram-set-color 00BFFF    # deep sky blue
+    ene-dram-set-color FF0000    # red
+
+Requires: python3-smbus  (apt-get install python3-smbus)
+
+Hardware: 4 × ENE DRAM sticks at i2c-0 addresses 0x70–0x73.
+
+Protocol reference: OpenRGB ENESMBusController / ENESMBusInterface_i2c_smbus.
+    Registers are 16-bit. To access register 0xREGH:REGL:
+        i2c_smbus_write_word_data(addr, cmd=0x00, word=byteswap(reg))
+        i2c_smbus_write_byte_data(addr, cmd=0x01, val)   # for single byte
+        i2c_smbus_write_block_data(addr, cmd=0x03, data) # for up to 3 bytes
+        i2c_smbus_read_byte_data(addr, cmd=0x81)         # for read
+
+Key registers:
+    ENE_REG_DEVICE_NAME     = 0x1000  (16 bytes, identifies controller variant)
+    ENE_REG_COLORS_EFFECT   = 0x8010  (V1: R,B,G per LED, 5 LEDs max)
+    ENE_REG_COLORS_EFFECT_V2= 0x8160  (V2: same layout, 10 LEDs max)
+    ENE_REG_MODE            = 0x8021  (0x01 = static)
+    ENE_REG_SPEED           = 0x8022
+    ENE_REG_DIRECTION       = 0x8023
+    ENE_REG_APPLY           = 0x80A0  (write 0x01 to apply)
+
+Note: ENE color order is R, B, G (blue and green are swapped vs RGB).
+"""
+
+import sys
+
+try:
+    import smbus
+except ImportError:
+    print("ERROR: python3-smbus not installed.  Run: sudo apt-get install python3-smbus",
+          file=sys.stderr)
+    sys.exit(1)
+
+# SMBus bus number and known DRAM addresses
+I2C_BUS   = 0
+DRAM_ADDRS = [0x70, 0x71, 0x72, 0x73]
+
+# Register addresses
+ENE_REG_DEVICE_NAME      = 0x1000
+ENE_REG_COLORS_EFFECT    = 0x8010   # V1: R,B,G per LED
+ENE_REG_COLORS_EFFECT_V2 = 0x8160  # V2: R,B,G per LED
+ENE_REG_MODE             = 0x8021
+ENE_REG_SPEED            = 0x8022
+ENE_REG_DIRECTION        = 0x8023
+ENE_REG_APPLY            = 0x80A0
+
+ENE_MODE_STATIC          = 0x01
+ENE_APPLY_VAL            = 0x01
+LED_COUNT                = 8        # 8 LEDs per stick (confirmed via OpenRGB probe)
+
+
+def _byteswap(reg):
+    """Convert 16-bit register address to SMBus word value (big-endian on wire)."""
+    return ((reg << 8) & 0xFF00) | ((reg >> 8) & 0x00FF)
+
+
+def ene_write(bus, addr, reg, val):
+    """Write a single byte to an ENE 16-bit register."""
+    bus.write_word_data(addr, 0x00, _byteswap(reg))
+    bus.write_byte_data(addr, 0x01, val)
+
+
+def ene_read(bus, addr, reg):
+    """Read a single byte from an ENE 16-bit register."""
+    bus.write_word_data(addr, 0x00, _byteswap(reg))
+    return bus.read_byte_data(addr, 0x81)
+
+
+def ene_write_block(bus, addr, reg, data):
+    """Write up to 3 bytes (R,B,G) to an ENE 16-bit register via block write."""
+    bus.write_word_data(addr, 0x00, _byteswap(reg))
+    bus.write_block_data(addr, 0x03, data)
+
+
+def read_device_name(bus, addr):
+    """Read 16-byte device name string from ENE chip."""
+    name = []
+    for i in range(16):
+        try:
+            name.append(ene_read(bus, addr, ENE_REG_DEVICE_NAME + i))
+        except OSError:
+            return ""
+    return bytes(name).rstrip(b'\x00').decode('ascii', errors='replace')
+
+
+def set_stick_color(bus, addr, r, g, b):
+    """Set all LEDs on one stick to a static color."""
+    # Determine effect register variant
+    dev_name = read_device_name(bus, addr)
+    if dev_name == "AUDA0-E6K5-0101":
+        effect_reg = ENE_REG_COLORS_EFFECT_V2
+    else:
+        effect_reg = ENE_REG_COLORS_EFFECT
+
+    # Write R, B, G (note: ENE order is R, Blue, Green — B and G swapped)
+    for led in range(LED_COUNT):
+        ene_write_block(bus, addr, effect_reg + led * 3, [r, b, g])
+
+    # Apply effect colors, then set static mode
+    ene_write(bus, addr, ENE_REG_APPLY, ENE_APPLY_VAL)
+    ene_write(bus, addr, ENE_REG_MODE,      ENE_MODE_STATIC)
+    ene_write(bus, addr, ENE_REG_SPEED,     0x00)
+    ene_write(bus, addr, ENE_REG_DIRECTION, 0x00)
+    ene_write(bus, addr, ENE_REG_APPLY,     ENE_APPLY_VAL)
+
+
+def set_color(r, g, b):
+    try:
+        bus = smbus.SMBus(I2C_BUS)
+    except OSError as e:
+        print(f"ERROR: Cannot open /dev/i2c-{I2C_BUS}: {e}", file=sys.stderr)
+        print("  Ensure i2c-dev is loaded and you have access to /dev/i2c-*", file=sys.stderr)
+        sys.exit(1)
+
+    found = 0
+    for addr in DRAM_ADDRS:
+        try:
+            set_stick_color(bus, addr, r, g, b)
+            found += 1
+        except OSError:
+            pass  # stick not present at this address
+
+    bus.close()
+
+    if found == 0:
+        print(f"WARNING: No ENE DRAM sticks found at addresses "
+              f"{[hex(a) for a in DRAM_ADDRS]} on i2c-{I2C_BUS}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main():
+    if len(sys.argv) < 2 or len(sys.argv[1]) != 6:
+        print("Usage: ene-dram-set-color RRGGBB", file=sys.stderr)
+        sys.exit(1)
+    try:
+        r = int(sys.argv[1][0:2], 16)
+        g = int(sys.argv[1][2:4], 16)
+        b = int(sys.argv[1][4:6], 16)
+    except ValueError:
+        print("ERROR: color must be a 6-digit hex value, e.g. 00BFFF", file=sys.stderr)
+        sys.exit(1)
+
+    set_color(r, g, b)
+
+
+if __name__ == "__main__":
+    main()

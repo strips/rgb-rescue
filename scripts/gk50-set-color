@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Set a static color on the MSI Vigor GK50 Low Profile keyboard.
+
+Usage:
+    gk50-set-color RRGGBB [brightness]
+    gk50-set-color FF0000       # red, full brightness
+    gk50-set-color 0000FF 3     # blue, 60% brightness
+
+Brightness levels 1–5:
+    1 = 20%  (0x33)
+    2 = 40%  (0x66)
+    3 = 60%  (0x99)
+    4 = 80%  (0xCC)
+    5 = 100% (0xFF)  [default]
+
+Protocol reference: gk50-rgb-setup.md
+"""
+
+import glob
+import os
+import select
+import sys
+
+VID = "0db0"
+PID = "0b5a"
+IFACE = "input1"
+REPORT_SIZE = 64
+READ_TIMEOUT = 0.3
+
+BRIGHTNESS = [0x33, 0x66, 0x99, 0xCC, 0xFF]
+
+
+def find_device():
+    """Return the /dev/hidrawN path for the GK50 LP RGB interface, or None."""
+    for path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            ue = open(f"{path}/device/uevent").read().lower()
+            if VID in ue and PID in ue and IFACE in ue:
+                return f"/dev/{os.path.basename(path)}"
+        except OSError:
+            pass
+    return None
+
+
+def _pad(buf):
+    b = bytes(buf)
+    return b + bytes(REPORT_SIZE - len(b))
+
+
+def write_drain(fd, buf):
+    """Write a 64-byte HID packet and drain the firmware's ACK response."""
+    os.write(fd, _pad(buf))
+    r, _, _ = select.select([fd], [], [], READ_TIMEOUT)
+    if r:
+        os.read(fd, REPORT_SIZE)
+
+
+def set_color(r, g, b, brightness_level=5):
+    """Send a static-color transaction to the keyboard and save to flash."""
+    bri = BRIGHTNESS[max(1, min(5, brightness_level)) - 1]
+
+    dev = find_device()
+    if dev is None:
+        print("ERROR: GK50 LP not found (is it plugged in?)", file=sys.stderr)
+        sys.exit(1)
+
+    fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        # --- 1. Stop any active animation (set mode to Off) ---
+        write_drain(fd, [0x41, 0x80])
+        write_drain(fd, [0x41, 0x80])          # firmware requires two BEGINs
+        write_drain(fd, [0x51, 0x28, 0x00, 0x00, 0x0C])  # COMMIT mode=Off
+        write_drain(fd, [0x50, 0x55])           # SAVE TO FLASH
+        write_drain(fd, [0x41, 0x00])           # END
+
+        # --- 2. Apply static color ---
+        write_drain(fd, [0x41, 0x80])
+
+        # Read current group-01 state so we can patch only the color bytes.
+        os.write(fd, _pad([0x56, 0x20, 0x01]))
+        rr, _, _ = select.select([fd], [], [], 0.5)
+        cur = bytearray(os.read(fd, REPORT_SIZE)) if rr else bytearray(REPORT_SIZE)
+
+        cur[1]  = 0x21   # read (0x20) → write (0x21)
+        cur[48] = r
+        cur[49] = g
+        cur[50] = b
+        cur[51] = bri
+
+        write_drain(fd, cur)
+        write_drain(fd, [0x51, 0x28, 0x00, 0x00, 0x01])  # COMMIT mode=Static
+        write_drain(fd, [0x50, 0x55])                      # SAVE TO FLASH
+        write_drain(fd, [0x41, 0x00])                      # END
+    finally:
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+
+    hex_color = sys.argv[1].lstrip("#")
+    if len(hex_color) != 6:
+        print(f"ERROR: color must be 6 hex digits, got '{sys.argv[1]}'", file=sys.stderr)
+        sys.exit(1)
+
+    r_val = int(hex_color[0:2], 16)
+    g_val = int(hex_color[2:4], 16)
+    b_val = int(hex_color[4:6], 16)
+    level = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+
+    set_color(r_val, g_val, b_val, level)

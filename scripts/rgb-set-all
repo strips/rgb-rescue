@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# rgb-set-all — apply the same solid color to all supported RGB devices.
+#
+# Usage:  rgb-set-all RRGGBB [brightness]
+#   RRGGBB      hex color, e.g. 00BFFF
+#   brightness  1–5 (default 4 = 80 %)
+#
+# Devices currently supported:
+#   • MSI Vigor GK50 LP keyboard   — gk50-set-color         (direct HID)
+#   • MSI MAG Z390 TOMAHAWK MB     — mystic-light-set-color (direct HID)
+#   • ENE DRAM sticks (4×)         — ene-dram-set-color     (i2c SMBus)
+
+set -euo pipefail
+
+COLOR="${1:?Usage: rgb-set-all RRGGBB [brightness 1-5]}"
+BRIGHTNESS="${2:-4}"
+
+/usr/local/bin/gk50-set-color "$COLOR" "$BRIGHTNESS"
+
+if [[ -x /usr/local/bin/mystic-light-set-color ]]; then
+    /usr/local/bin/mystic-light-set-color "$COLOR" || true
+fi
+
+if [[ -x /usr/local/bin/ene-dram-set-color ]]; then
+    /usr/local/bin/ene-dram-set-color "$COLOR" || true
+fi

@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Set a static color on the MSI MAG Z390 TOMAHAWK Mystic Light controller.
+
+Usage:
+    mystic-light-set-color RRGGBB
+    mystic-light-set-color 00BFFF    # deep sky blue
+    mystic-light-set-color FF0000    # red
+
+Protocol reference:
+    OpenRGB MSIMysticLight162Controller (162-byte variant, PID 0x7B18).
+    The board uses USB HID feature reports:
+      - GET feature report 0x52 (162 bytes) reads current state.
+      - SET feature report 0x52 (162 bytes) applies + optionally saves.
+    save_data byte (offset 161) = 1 to persist across reboots.
+
+Packet layout (FeaturePacket_162, 162 bytes total):
+    byte 0        : report ID = 0x52
+    bytes 1-10    : j_rgb_1   (ZoneData, 10 bytes)
+    bytes 11-20   : j_rainbow_1
+    bytes 21-30   : j_corsair_1
+    bytes 31-40   : j_corsair_outerll120
+    bytes 41-50   : on_board_led     (zone 0)
+    bytes 51-60   : on_board_led_1
+    bytes 61-70   : on_board_led_2
+    bytes 71-80   : on_board_led_3
+    bytes 81-90   : on_board_led_4
+    bytes 91-100  : on_board_led_5
+    bytes 101-110 : on_board_led_6
+    bytes 111-120 : on_board_led_7
+    bytes 121-130 : on_board_led_8
+    bytes 131-140 : on_board_led_9
+    bytes 141-150 : on_board_led_10
+    bytes 151-160 : j_rgb_2
+    byte 161      : save_data
+
+ZoneData layout (10 bytes):
+    0 : effect  (0x01 = static)
+    1 : color.R
+    2 : color.G
+    3 : color.B
+    4 : speedAndBrightnessFlags  = (brightness_level << 2) | speed
+    5 : color2.R
+    6 : color2.G
+    7 : color2.B
+    8 : colorFlags  (bit 7 = 1 means use fixed color, not rainbow)
+    9 : padding
+
+Board config for 0x7B18 (MAG Z390 TOMAHAWK):
+    numof_onboard_leds = 6
+    supported_zones: J_RGB_1, J_RGB_2, J_RAINBOW_1, ON_BOARD_LED_0
+"""
+
+import fcntl
+import glob
+import os
+import struct
+import sys
+
+VID = "1462"
+PID = "7b18"
+# Interface 0 (usage page 0x0001) is the Mystic Light control interface.
+IFACE = "input0"
+
+REPORT_ID     = 0x52
+PACKET_SIZE   = 162   # bytes including report ID
+MODE_STATIC   = 0x01
+BRIGHTNESS    = 10    # MSI_BRIGHTNESS_LEVEL_100 = 10  →  speedAndBrightnessFlags = 10<<2 = 0x28
+COLOR_FLAGS   = 0x80  # bit 7 set = fixed color (not rainbow)
+
+# Zones we set for this board (zone offset in bytes from byte 1):
+# j_rgb_1=0, j_rainbow_1=10, j_corsair_1=20, j_corsair_outerll120=30,
+# on_board_led[0..6]=40..100, j_rgb_2=150
+# For static color we write all zones OpenRGB considers supported:
+# J_RGB_1, J_RGB_2, J_RAINBOW_1, ON_BOARD_LED_0..5
+ZONE_OFFSETS = {
+    "j_rgb_1":            1,
+    "j_rainbow_1":       11,
+    "on_board_led":      41,
+    "on_board_led_1":    51,
+    "on_board_led_2":    61,
+    "on_board_led_3":    71,
+    "on_board_led_4":    81,
+    "on_board_led_5":    91,
+    "j_rgb_2":          151,
+}
+
+# Linux ioctl numbers for HID feature reports (on 64-bit: _IOWR(0x48,'G',len))
+def _hidiocgfeature(length):
+    return (0xC0000000 | (length << 16) | (0x48 << 8) | 0x07)
+
+def _hidiocsfeature(length):
+    return (0xC0000000 | (length << 16) | (0x48 << 8) | 0x06)
+
+
+def find_device():
+    """Return /dev/hidrawN for the Mystic Light interface, or None."""
+    for path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            ue = open(f"{path}/device/uevent").read().lower()
+            if VID in ue and PID in ue and IFACE in ue:
+                return f"/dev/{os.path.basename(path)}"
+        except OSError:
+            pass
+    return None
+
+
+def hid_get_feature(fd, report_id, length):
+    """Read a HID feature report via ioctl."""
+    buf = bytearray(length)
+    buf[0] = report_id
+    fcntl.ioctl(fd, _hidiocgfeature(length), buf)
+    return buf
+
+
+def hid_set_feature(fd, data):
+    """Send a HID feature report via ioctl."""
+    buf = bytearray(data)
+    fcntl.ioctl(fd, _hidiocsfeature(len(buf)), buf)
+
+
+def set_zone(packet, offset, r, g, b):
+    """Patch a ZoneData block in the packet buffer for static color."""
+    packet[offset + 0] = MODE_STATIC
+    packet[offset + 1] = r
+    packet[offset + 2] = g
+    packet[offset + 3] = b
+    packet[offset + 4] = (BRIGHTNESS << 2)  # speedAndBrightnessFlags, speed=0
+    packet[offset + 5] = r                  # color2 = same color
+    packet[offset + 6] = g
+    packet[offset + 7] = b
+    packet[offset + 8] = COLOR_FLAGS        # bit 7 = fixed color
+    packet[offset + 9] = 0                  # padding
+
+
+def set_color(r, g, b):
+    dev = find_device()
+    if dev is None:
+        print("ERROR: Mystic Light controller (1462:7b18) not found", file=sys.stderr)
+        sys.exit(1)
+
+    fd = os.open(dev, os.O_RDWR)
+    try:
+        # Read current state from hardware
+        packet = hid_get_feature(fd, REPORT_ID, PACKET_SIZE)
+
+        # Set all supported zones to static color
+        for offset in ZONE_OFFSETS.values():
+            set_zone(packet, offset, r, g, b)
+
+        # Also force on_board_led colorFlags to include sync bit (0x81) as
+        # OpenRGB does: colorFlags = 0x80 | SYNC_SETTING_ONBOARD (0x01)
+        packet[41 + 8] = 0x81
+
+        # save_data = 1 → persist to flash
+        packet[161] = 1
+
+        hid_set_feature(fd, packet)
+    finally:
+        os.close(fd)
+
+
+def main():
+    if len(sys.argv) < 2 or len(sys.argv[1]) != 6:
+        print("Usage: mystic-light-set-color RRGGBB", file=sys.stderr)
+        sys.exit(1)
+    try:
+        r = int(sys.argv[1][0:2], 16)
+        g = int(sys.argv[1][2:4], 16)
+        b = int(sys.argv[1][4:6], 16)
+    except ValueError:
+        print("ERROR: color must be a 6-digit hex value, e.g. 00BFFF", file=sys.stderr)
+        sys.exit(1)
+
+    set_color(r, g, b)
+
+
+if __name__ == "__main__":
+    main()
