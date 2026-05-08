@@ -37,7 +37,6 @@ udev/
     60-rgb-devices.rules         hidraw + i2c-dev group access rules
 modules-load.d/
     i2c-dev.conf                 loads i2c-dev at boot
-gk50-rgb-setup.md               keyboard protocol research notes (keep)
 ```
 
 ---
@@ -141,9 +140,9 @@ Brightness byte: `0x33`=20%, `0x66`=40%, `0x99`=60%, `0xCC`=80%, `0xFF`=100%.
 SAVE TO FLASH is permanent — the keyboard retains the colour across power
 cycles with no host software running.
 
-**Reference:** `gk50-rgb-setup.md` in this repo (full protocol notes).
-OpenRGB C++ source: `Controllers/MSIVigorController/MSIVigorGK50LPController.cpp`
+**Reference:** OpenRGB C++ source: `Controllers/MSIVigorController/MSIVigorGK50LPController.cpp`
 at `https://gitlab.com/strips1/OpenRGB` branch `add-msi-vigor-gk50-low-profile`.
+The Python script is a direct translation of `SetOff()` + `SetStatic()` from that file.
 
 ---
 
